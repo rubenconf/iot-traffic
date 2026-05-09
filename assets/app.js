@@ -9,8 +9,11 @@ let scans = [];
 const socket = io(`http://${window.location.host}`); // Initialize socket.io connection
 let errorContainer = document.getElementById("error-container");
 let lighting_status = false;
-let trafficLightState = "GREEN_AUTO";
+let trafficLightState = "RED_PEDESTRIAN";
 let trafficLightTimer = null;
+//================================================================================
+//to do, make the lighting red at the start always
+changeLightingColor("red");
 
 // Start the application
 document.addEventListener("DOMContentLoaded", () => {
@@ -58,7 +61,7 @@ document.addEventListener("DOMContentLoaded", () => {
     printDetection(fakeDetection);
     renderDetections();
     updateTrafficLight(fakeDetection);
-  }, 2000);
+  }, 15000);
 });
 
 function initSocketIO() {
@@ -94,9 +97,9 @@ function updateTrafficLight(message) {
   }
 
   //stopping cars, making pedestrians able to walk
-  if (trafficLightState === "GREEN_AUTO") {
-    trafficLightState = "RED_AUTO";
-    cambiarColorSemaforoWeb("red");
+  if (trafficLightState === "RED_PEDESTRIAN") {
+    trafficLightState = "GREEN_PEDESTRIAN";
+    changeLightingColor("green");
     trafficLightTimer = setTimeout(() => {
       iniciarFaseCooldown();
     }, 15000);
@@ -107,28 +110,28 @@ function updateTrafficLight(message) {
 
 function iniciarFaseCooldown() {
   trafficLightState = "COOLDOWN";
-  cambiarColorSemaforoWeb("green");
+  changeLightingColor("red");
   trafficLightTimer = setTimeout(() => {
-    trafficLightState = "GREEN_AUTO";
+    trafficLightState = "RED_PEDESTRIAN";
     console.log("Pedestrians stop!");
   }, 30000); //
 }
 
-function cambiarColorSemaforoWeb(color) {
+function changeLightingColor(color) {
   const statusText = document.getElementById("feedback-content");
 
   if (color === "red") {
     statusText.innerHTML = `
             <div style="text-align: center; color: red; font-weight: bold; font-size: 1.5rem;">
                 🔴 RED LIGHT<br>
-                <span style="font-size: 1rem; color: #555;">Pedestrians crossing!</span>
+                <span style="font-size: 1rem; color: #555;">Cars moving!</span>
             </div>
         `;
   } else if (color === "green") {
     statusText.innerHTML = `
             <div style="text-align: center; color: green; font-weight: bold; font-size: 1.5rem;">
                 🟢 GREEN LIGHT<br>
-                <span style="font-size: 1rem; color: #555;">Cars moving...</span>
+                <span style="font-size: 1rem; color: #555;">Pedestrians crossing...</span>
             </div>
         `;
   }
