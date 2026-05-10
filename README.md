@@ -19,3 +19,6 @@ We’ve all been there: standing at a pedestrian crossing, waiting for a light t
 
 ## What we learned
 **IoT & Edge Computing:** Gained deeper insights into how low-power hardware sensors can be integrated with city-scale infrastructure.
+
+---
+**Submitted to the Qualcomm & Arduino Challenge**
