@@ -7,6 +7,57 @@
 const MAX_RECENT_SCANS = 5;
 let scans = [];
 const socket = io(`http://${window.location.host}`); // Initialize socket.io connection
+
+const detectionStreamOrigin = `http://${window.location.hostname || "localhost"}:4912`;
+
+/** Socket to Edge Impulse runner (:4912); used for live threshold-override. */
+let detectionCamSocket = null;
+/** { id, key } from runner hello.thresholds (e.g. min_score on object detection). */
+let edgeImpulseThresholdTarget = null;
+
+function pickEdgeImpulseThresholdTarget(thresholds) {
+  if (!Array.isArray(thresholds) || thresholds.length === 0) {
+    return null;
+  }
+  for (const t of thresholds) {
+    if (t && typeof t.min_score === "number") {
+      return { id: t.id, key: "min_score" };
+    }
+  }
+  for (const t of thresholds) {
+    if (!t || typeof t !== "object") {
+      continue;
+    }
+    for (const k of Object.keys(t)) {
+      if (k === "id" || k === "type") {
+        continue;
+      }
+      if (typeof t[k] === "number") {
+        return { id: t.id, key: k };
+      }
+    }
+  }
+  return null;
+}
+
+function emitEdgeImpulseThresholdOverride(numericValue) {
+  if (!detectionCamSocket || !edgeImpulseThresholdTarget) {
+    return;
+  }
+  if (!detectionCamSocket.connected) {
+    return;
+  }
+  const v = Number(numericValue);
+  if (Number.isNaN(v)) {
+    return;
+  }
+  detectionCamSocket.emit("threshold-override", {
+    id: edgeImpulseThresholdTarget.id,
+    key: edgeImpulseThresholdTarget.key,
+    value: v,
+  });
+}
+
 // let errorContainer = document.getElementById("error-container");
 let lighting_status = false;
 let trafficLightTimer = null;
@@ -49,6 +100,7 @@ const countdownText = document.getElementById("countdown-text");
 // Start the application
 document.addEventListener("DOMContentLoaded", () => {
   initSocketIO();
+  initCameraPreviewStream();
   initializeConfidenceSlider();
   updateFeedback(null);
   renderDetections();
@@ -69,6 +121,249 @@ document.addEventListener("DOMContentLoaded", () => {
   // }, 15000);
   startGreenPedestrianPhase();
 });
+
+function initCameraPreviewStream() {
+  const img = document.getElementById("cameraStreamImg");
+  const placeholder = document.getElementById("videoPlaceholder");
+  const wrap = document.getElementById("cameraStreamWrap");
+  if (!img || !placeholder || !wrap) return;
+
+  const bboxColors = [
+    "#e6194B",
+    "#3cb44b",
+    "#ffe119",
+    "#4363d8",
+    "#f58231",
+    "#42d4f4",
+    "#f032e6",
+    "#fabed4",
+    "#469990",
+    "#dcbeff",
+    "#9A6324",
+    "#fffac8",
+    "#800000",
+    "#aaffc3",
+  ];
+  let bboxColorIx = 0;
+  const labelToColor = {};
+
+  function clearBoundingBoxes() {
+    for (const bx of wrap.querySelectorAll(".bounding-box-container")) {
+      bx.remove();
+    }
+  }
+
+  let lastClassificationOpts = null;
+
+  function isPersonDetection(detection) {
+    const raw = detection && detection.label;
+    if (raw == null) {
+      return false;
+    }
+    return String(raw).toLowerCase() === "person";
+  }
+
+  function renderDetectionOverlays(opts) {
+    const result = opts && opts.result;
+    const modelType = opts && opts.modelType;
+    if (!result) {
+      return;
+    }
+    if (img.naturalHeight === 0 || img.clientHeight === 0) {
+      return;
+    }
+
+    clearBoundingBoxes();
+
+    const factor = img.naturalHeight / img.clientHeight;
+
+    const boxes = result.object_tracking || result.bounding_boxes;
+    if (boxes && boxes.length) {
+      for (const b of boxes) {
+        if (!isPersonDetection(b)) {
+          continue;
+        }
+        const bb = {
+          x: b.x / factor,
+          y: b.y / factor,
+          width: b.width / factor,
+          height: b.height / factor,
+          label:
+            "object_id" in b ? `${b.label} (ID ${b.object_id})` : b.label,
+          value: "value" in b ? b.value : undefined,
+        };
+
+        if (!labelToColor[bb.label]) {
+          labelToColor[bb.label] =
+            bboxColors[bboxColorIx++ % bboxColors.length];
+        }
+        const color = labelToColor[bb.label];
+
+        const el = document.createElement("div");
+        el.className = "bounding-box-container";
+        el.style.position = "absolute";
+        el.style.border = `solid 3px ${color}`;
+        el.style.boxSizing = "border-box";
+        el.style.pointerEvents = "none";
+
+        if (modelType === "object_detection") {
+          el.style.width = `${bb.width}px`;
+          el.style.height = `${bb.height}px`;
+          el.style.left = `${bb.x}px`;
+          el.style.top = `${bb.y}px`;
+        } else if (modelType === "constrained_object_detection") {
+          const centerX = bb.x + bb.width / 2;
+          const centerY = bb.y + bb.height / 2;
+          el.style.borderRadius = "10px";
+          el.style.width = "20px";
+          el.style.height = "20px";
+          el.style.left = `${centerX - 10}px`;
+          el.style.top = `${centerY - 10}px`;
+        } else {
+          el.style.width = `${bb.width}px`;
+          el.style.height = `${bb.height}px`;
+          el.style.left = `${bb.x}px`;
+          el.style.top = `${bb.y}px`;
+        }
+
+        const labelEl = document.createElement("div");
+        labelEl.className = "bounding-box-label";
+        labelEl.style.background = color;
+        labelEl.style.color = "#fff";
+        labelEl.style.fontSize = "11px";
+        labelEl.style.lineHeight = "1.2";
+        labelEl.style.padding = "2px 6px";
+        labelEl.style.position = "absolute";
+        labelEl.style.left = "0";
+        labelEl.style.top = "0";
+        labelEl.style.transform = "translateY(-100%)";
+        if (modelType === "constrained_object_detection") {
+          el.style.whiteSpace = "nowrap";
+        }
+        labelEl.textContent = bb.label;
+        if (typeof bb.value === "number") {
+          labelEl.textContent += ` (${bb.value.toFixed(2)})`;
+        }
+
+        el.appendChild(labelEl);
+        wrap.appendChild(el);
+      }
+    }
+
+    if (result.visual_anomaly_grid && result.visual_anomaly_grid.length) {
+      for (const b of result.visual_anomaly_grid) {
+        if (!isPersonDetection(b)) {
+          continue;
+        }
+        const bb = {
+          x: b.x / factor,
+          y: b.y / factor,
+          width: b.width / factor,
+          height: b.height / factor,
+          value: b.value,
+        };
+
+        const el = document.createElement("div");
+        el.className = "bounding-box-container";
+        el.style.position = "absolute";
+        el.style.background = "rgba(255, 0, 0, 0.5)";
+        el.style.width = `${bb.width}px`;
+        el.style.height = `${bb.height}px`;
+        el.style.left = `${bb.x}px`;
+        el.style.top = `${bb.y}px`;
+        el.style.display = "flex";
+        el.style.alignItems = "center";
+        el.style.justifyContent = "center";
+        el.style.boxSizing = "border-box";
+        el.style.pointerEvents = "none";
+
+        let scoreFontSize = "";
+        let scoreText = bb.value.toFixed(2);
+        if (bb.width < 15) {
+          scoreFontSize = "4px";
+          scoreText = bb.value.toFixed(1);
+        } else if (bb.width < 20) {
+          scoreFontSize = "6px";
+          scoreText = bb.value.toFixed(1);
+        } else if (bb.width < 32) {
+          scoreFontSize = "9px";
+        }
+
+        const score = document.createElement("div");
+        score.style.color = "white";
+        if (scoreFontSize) {
+          score.style.fontSize = scoreFontSize;
+        }
+        score.textContent = scoreText;
+        el.appendChild(score);
+        wrap.appendChild(el);
+      }
+    }
+  }
+
+  const camSocket = io(detectionStreamOrigin, {
+    transports: ["websocket", "polling"],
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+  });
+  detectionCamSocket = camSocket;
+
+  const showStream = () => {
+    placeholder.style.display = "none";
+    img.style.display = "block";
+  };
+
+  const hideStream = () => {
+    placeholder.style.display = "";
+    img.style.display = "none";
+    img.removeAttribute("src");
+    lastClassificationOpts = null;
+    edgeImpulseThresholdTarget = null;
+    clearBoundingBoxes();
+  };
+
+  camSocket.on("connect", () => {
+    camSocket.emit("hello");
+  });
+
+  camSocket.on("hello", (opts) => {
+    edgeImpulseThresholdTarget = pickEdgeImpulseThresholdTarget(
+      opts && opts.thresholds,
+    );
+    showStream();
+    const slider = document.getElementById("confidenceSlider");
+    if (slider) {
+      emitEdgeImpulseThresholdOverride(parseFloat(slider.value));
+    }
+  });
+
+  camSocket.on("image", (opts) => {
+    if (opts && opts.img) {
+      img.src = opts.img;
+    }
+  });
+
+  camSocket.on("classification", (opts) => {
+    lastClassificationOpts = opts;
+    renderDetectionOverlays(opts);
+  });
+
+  camSocket.on("disconnect", hideStream);
+
+  img.addEventListener("load", () => {
+    if (lastClassificationOpts) {
+      renderDetectionOverlays(lastClassificationOpts);
+    }
+  });
+
+  window.addEventListener("resize", () => {
+    requestAnimationFrame(() => {
+      if (lastClassificationOpts) {
+        renderDetectionOverlays(lastClassificationOpts);
+      }
+    });
+  });
+}
 
 function initSocketIO() {
   socket.on("connect", () => {
@@ -379,6 +674,9 @@ function initializeConfidenceSlider() {
   const confidenceSlider = document.getElementById("confidenceSlider");
   // const confidenceInput = document.getElementById("confidenceInput");
   // const confidenceResetButton = document.getElementById("confidenceResetButton");
+  if (!confidenceSlider) {
+    return;
+  }
 
   confidenceSlider.addEventListener("input", updateConfidenceDisplay);
   // confidenceInput.addEventListener("input", handleConfidenceInputChange);
@@ -420,9 +718,13 @@ function updateConfidenceDisplay() {
   //   "confidenceValueDisplay",
   // );
   // const sliderProgress = document.getElementById("sliderProgress");
+  if (!confidenceSlider) {
+    return;
+  }
 
   const value = parseFloat(confidenceSlider.value);
   socket.emit("override_th", value); // Send confidence to backend
+  emitEdgeImpulseThresholdOverride(value); // Edge Impulse runner on :4912
   const percentage =
     ((value - confidenceSlider.min) /
       (confidenceSlider.max - confidenceSlider.min)) *

@@ -8,7 +8,7 @@ from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 from datetime import datetime, UTC
 
 ui = WebUI()
-detection_stream = VideoObjectDetection(confidence=0.5, debounce_sec=0.0)
+detection_stream = VideoObjectDetection(confidence=0.65, debounce_sec=0.0)
 
 ui.on_message("override_th", lambda sid, threshold: detection_stream.override_threshold(threshold))
 
